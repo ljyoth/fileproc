@@ -81,7 +81,8 @@ pub fn processes<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
                 if err.code() != STATUS_INFO_LENGTH_MISMATCH.to_hresult() {
                     break Err(err);
                 }
-                buffer.resize(io_status_block.Information * size_of::<usize>(), 0);
+                buffer.reserve(io_status_block.Information * size_of::<usize>());
+                dbg!(buffer.capacity());
             } else {
                 let process_ids = buffer.as_ptr() as *const FILE_PROCESS_IDS_USING_FILE_INFORMATION;
                 break Ok(&*process_ids);
@@ -172,7 +173,7 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
             if let Err(err) = NtQuerySystemInformation(
                 SYSTEM_EXTENDED_HANDLE_INFORMATION,
                 buffer.as_mut_ptr() as _,
-                buffer.len() as _,
+                buffer.capacity() as _,
                 &mut length,
             )
             .ok()
@@ -180,8 +181,10 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
                 if err.code() != STATUS_INFO_LENGTH_MISMATCH.to_hresult() {
                     break Err(err);
                 }
-                buffer.resize(length as usize, 0);
-                dbg!(buffer.len());
+                // reserve additional bytes in case `length` increases next iteration
+                buffer
+                    .reserve(length as usize + size_of::<SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX>() * 25);
+                dbg!(buffer.capacity());
             } else {
                 let handle_info = buffer.as_ptr() as *const SYSTEM_HANDLE_INFORMATION_EX;
                 break Ok(&*handle_info);
@@ -218,7 +221,7 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
                             HANDLE(handle_entry.HandleValue as _),
                             ObjectTypeInformation,
                             Some(type_info_buf.as_mut_ptr() as _),
-                            type_info_buf.len() as _,
+                            type_info_buf.capacity() as _,
                             Some(&mut length),
                         )
                         .ok()
@@ -226,8 +229,8 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
                             if err.code() != STATUS_INFO_LENGTH_MISMATCH.to_hresult() {
                                 break Err(err);
                             }
-                            type_info_buf.resize(length as usize, 0);
-                            dbg!(type_info_buf.len());
+                            type_info_buf.reserve(length as usize);
+                            dbg!(type_info_buf.capacity());
                         } else {
                             let object_type_info =
                                 type_info_buf.as_ptr() as *const PUBLIC_OBJECT_TYPE_INFORMATION;
