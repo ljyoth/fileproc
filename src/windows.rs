@@ -16,8 +16,8 @@ use windows::{
     },
     Win32::{
         Foundation::{
-            CloseHandle, GetLastError, HANDLE, HMODULE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH,
-            UNICODE_STRING,
+            CloseHandle, GetLastError, SetLastError, HANDLE, HMODULE, MAX_PATH, NO_ERROR,
+            STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
         },
         Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED},
         System::{
@@ -112,11 +112,10 @@ pub fn find_processes_by_name(name: &str) -> Result<Vec<Process>, Error> {
     find_processes_cond(|entry| {
         let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
         if entry.szExeFile[..len as usize] == name_u16 {
-            if let Ok(process) = get_process(entry.th32ProcessID as usize) {
-                return Some(process);
-            }
+            let process = get_process(entry.th32ProcessID as usize)?;
+            return Ok(Some(process));
         }
-        None
+        Ok(None)
     })
 }
 
@@ -127,17 +126,16 @@ pub fn find_processes_by_path<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, E
     find_processes_cond(|entry| {
         let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
         if entry.szExeFile[..len as usize] == name_u16 {
-            if let Ok(process) = get_process(entry.th32ProcessID as usize) {
-                if process.path() == file.as_ref() {
-                    return Some(process);
-                }
+            let process = get_process(entry.th32ProcessID as usize)?;
+            if process.path() == file.as_ref() {
+                return Ok(Some(process));
             }
         }
-        None
+        Ok(None)
     })
 }
 
-fn find_processes_cond<P: Fn(PROCESSENTRY32W) -> Option<Process>>(
+fn find_processes_cond<P: Fn(PROCESSENTRY32W) -> Result<Option<Process>, Error>>(
     cond: P,
 ) -> Result<Vec<Process>, Error> {
     let mut processes = vec![];
@@ -147,7 +145,7 @@ fn find_processes_cond<P: Fn(PROCESSENTRY32W) -> Option<Process>>(
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
         Process32FirstW(snapshot, &mut entry)?;
         while Process32NextW(snapshot, &mut entry).is_ok() {
-            if let Some(process) = cond(entry) {
+            if let Some(process) = cond(entry)? {
                 processes.push(process);
             }
         }
@@ -164,6 +162,7 @@ fn get_process(id: usize) -> Result<Process, Error> {
             false,
             id as u32,
         )?;
+        SetLastError(NO_ERROR);
         let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
         GetLastError().ok()?;
         CloseHandle(handle)?;
@@ -263,7 +262,7 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
             Vec::with_capacity(size_of::<PUBLIC_OBJECT_TYPE_INFORMATION>());
         let mut path_buf: Vec<u16> = vec![0; MAX_PATH as usize];
         let mut ptr = &handle_info.Handles as *const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
-        for _ in 0..handle_info.NumberOfHandles {
+        for i in 0..handle_info.NumberOfHandles {
             let handle_entry = &*ptr;
             if handle_entry.UniqueProcessId == pid {
                 let mut handle = HANDLE::default();
@@ -317,6 +316,7 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
                             // let name = buf.as_ptr() as *const UNICODE_STRING;
                             // let name = String::from_utf16_lossy((*name).Buffer.as_wide());
 
+                            SetLastError(NO_ERROR);
                             let len = GetFinalPathNameByHandleW(
                                 HANDLE(handle_entry.HandleValue as _),
                                 &mut path_buf,
