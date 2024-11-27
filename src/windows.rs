@@ -16,10 +16,15 @@ use windows::{
     },
     Win32::{
         Foundation::{
-            GetLastError, HANDLE, HMODULE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
+            CloseHandle, GetLastError, HANDLE, HMODULE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH,
+            UNICODE_STRING,
         },
         Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED},
         System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32First, Process32FirstW, Process32NextW,
+                PROCESSENTRY32, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+            },
             ProcessStatus::GetModuleFileNameExW,
             Threading::{
                 GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION,
@@ -94,28 +99,60 @@ pub fn processes<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
         let mut ptr = &process_ids.ProcessIdList as *const usize;
         for _ in 0..process_ids.NumberOfProcessIdsInList {
             let id = *ptr;
-            let handle = OpenProcess(
-                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-                false,
-                id as u32,
-            )?;
-            let mut buf = vec![0; MAX_PATH as usize];
-            let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
-            GetLastError().ok()?;
-            let name = String::from_utf16(&buf[0..len as usize]).unwrap();
-            let path = PathBuf::from(name);
-
-            // TODO: get window name?
-            // let handle = GetWindowThreadProcessId(handle, handle);
-            // let len = GetWindowTextW(handle, &mut buf);
-            // println!("{:?}", GetLastError().ok());
-            // println!("{}: {:?}", len, buf);
-
-            processes.push(Process { id, path });
+            let process = get_process(id)?;
+            processes.push(process);
             ptr = ptr.add(1);
         }
     };
     Ok(processes)
+}
+
+/// TODO find process given path
+pub fn find_process(name: &str) -> Result<Option<Process>, Error> {
+    let name_u16: Vec<u16> = name.encode_utf16().collect();
+    let id = unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        Process32FirstW(snapshot, &mut entry)?;
+        let id = loop {
+            if Process32NextW(snapshot, &mut entry).is_err() {
+                return Ok(None);
+            }
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
+            if entry.szExeFile[..len as usize] == name_u16 {
+                break entry.th32ProcessID;
+            }
+        };
+        CloseHandle(snapshot)?;
+        id
+    };
+    Ok(Some(get_process(id as usize)?))
+}
+
+fn get_process(id: usize) -> Result<Process, Error> {
+    let mut buf = vec![0; MAX_PATH as usize];
+    let len = unsafe {
+        let handle = OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            false,
+            id as u32,
+        )?;
+        let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
+        GetLastError().ok()?;
+        CloseHandle(handle)?;
+        len
+    };
+    let name = String::from_utf16(&buf[0..len as usize]).unwrap();
+    let path = PathBuf::from(name);
+
+    // TODO: get window name?
+    // let handle = GetWindowThreadProcessId(handle, handle);
+    // let len = GetWindowTextW(handle, &mut buf);
+    // println!("{:?}", GetLastError().ok());
+    // println!("{}: {:?}", len, buf);
+
+    Ok(Process { id, path })
 }
 
 #[repr(C)]
@@ -191,7 +228,6 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
             }
         }
     }?;
-    println!("{:?}", handle_info);
     let mut files = Vec::with_capacity(handle_info.NumberOfHandles);
     unsafe {
         let proc_handle = OpenProcess(PROCESS_DUP_HANDLE, false, pid as u32)?;
