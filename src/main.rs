@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
                 find_processes_by_name(&process_name)
             }?;
             for process in processes {
-                let files = files_by_pid(process.id())?;
-                // let files = files(&process)?;
+                // let files = files_by_pid(process.id())?;
+                let files = files(&process)?;
                 println!("process: {process:?} files: {files:?}");
             }
         }

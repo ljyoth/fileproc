@@ -128,7 +128,11 @@ pub fn processes<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
         let mut ptr = &process_ids.ProcessIdList as *const usize;
         for _ in 0..process_ids.NumberOfProcessIdsInList {
             let id = *ptr;
-            let process = get_process(id, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
+            // TODO: should only add PROCESS_DUP_HANDLE if required
+            let process = get_process(
+                id,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE,
+            )?;
             processes.push(process);
             ptr = ptr.add(1);
         }
@@ -141,9 +145,10 @@ pub fn find_processes_by_name(name: &str) -> Result<Vec<Process>, Error> {
     find_processes_cond(|entry| {
         let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
         if entry.szExeFile[..len as usize] == name_u16 {
+            // TODO: should only add PROCESS_DUP_HANDLE if required
             let process = get_process(
                 entry.th32ProcessID as usize,
-                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE,
             )?;
             return Ok(Some(process));
         }
@@ -160,7 +165,8 @@ pub fn find_processes_by_path<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, E
         if entry.szExeFile[..len as usize] == name_u16 {
             let process = get_process(
                 entry.th32ProcessID as usize,
-                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                // TODO: should only add PROCESS_DUP_HANDLE if required
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE,
             )?;
             if process.path() == file.as_ref() {
                 return Ok(Some(process));
