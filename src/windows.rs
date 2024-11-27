@@ -22,8 +22,8 @@ use windows::{
         Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED},
         System::{
             Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Process32First, Process32FirstW, Process32NextW,
-                PROCESSENTRY32, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
             },
             ProcessStatus::GetModuleFileNameExW,
             Threading::{
@@ -308,6 +308,7 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
             }
             ptr = ptr.add(1);
         }
+        CloseHandle(proc_handle)?;
     };
     Ok(files)
 }
