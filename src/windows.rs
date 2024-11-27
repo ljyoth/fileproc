@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
 };
@@ -17,7 +18,7 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, GetLastError, SetLastError, HANDLE, HMODULE, MAX_PATH, NO_ERROR,
-            STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
+            STATUS_ACCESS_DENIED, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
         },
         Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED},
         System::{
@@ -27,16 +28,14 @@ use windows::{
             },
             ProcessStatus::GetModuleFileNameExW,
             Threading::{
-                GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION,
-                PROCESS_VM_READ,
+                GetCurrentProcess, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_DUP_HANDLE,
+                PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
             },
             WindowsProgramming::PUBLIC_OBJECT_TYPE_INFORMATION,
             IO::IO_STATUS_BLOCK,
         },
     },
 };
-
-use crate::Process;
 
 #[derive(Debug)]
 pub enum Error {
@@ -64,6 +63,36 @@ impl From<std::io::Error> for Error {
 impl From<windows::core::Error> for Error {
     fn from(value: windows::core::Error) -> Self {
         Self::Windows(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Process {
+    id: usize,
+    path: PathBuf,
+    handle: Handle,
+}
+
+impl Process {
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn name(&self) -> Cow<'_, str> {
+        self.path().file_name().unwrap().to_string_lossy()
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Handle(HANDLE);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0).unwrap() }
     }
 }
 
@@ -99,7 +128,7 @@ pub fn processes<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
         let mut ptr = &process_ids.ProcessIdList as *const usize;
         for _ in 0..process_ids.NumberOfProcessIdsInList {
             let id = *ptr;
-            let process = get_process(id)?;
+            let process = get_process(id, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
             processes.push(process);
             ptr = ptr.add(1);
         }
@@ -112,7 +141,10 @@ pub fn find_processes_by_name(name: &str) -> Result<Vec<Process>, Error> {
     find_processes_cond(|entry| {
         let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
         if entry.szExeFile[..len as usize] == name_u16 {
-            let process = get_process(entry.th32ProcessID as usize)?;
+            let process = get_process(
+                entry.th32ProcessID as usize,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            )?;
             return Ok(Some(process));
         }
         Ok(None)
@@ -126,7 +158,10 @@ pub fn find_processes_by_path<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, E
     find_processes_cond(|entry| {
         let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
         if entry.szExeFile[..len as usize] == name_u16 {
-            let process = get_process(entry.th32ProcessID as usize)?;
+            let process = get_process(
+                entry.th32ProcessID as usize,
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            )?;
             if process.path() == file.as_ref() {
                 return Ok(Some(process));
             }
@@ -154,18 +189,13 @@ fn find_processes_cond<P: Fn(PROCESSENTRY32W) -> Result<Option<Process>, Error>>
     Ok(processes)
 }
 
-fn get_process(id: usize) -> Result<Process, Error> {
+fn get_process(id: usize, flags: PROCESS_ACCESS_RIGHTS) -> Result<Process, Error> {
     let mut buf = vec![0; MAX_PATH as usize];
+    let handle = get_process_handle(id, flags)?;
     let len = unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            false,
-            id as u32,
-        )?;
         SetLastError(NO_ERROR);
-        let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
+        let len = GetModuleFileNameExW(handle.0, HMODULE::default(), &mut buf);
         GetLastError().ok()?;
-        CloseHandle(handle)?;
         len
     };
     let name = String::from_utf16(&buf[0..len as usize]).unwrap();
@@ -177,7 +207,12 @@ fn get_process(id: usize) -> Result<Process, Error> {
     // println!("{:?}", GetLastError().ok());
     // println!("{}: {:?}", len, buf);
 
-    Ok(Process { id, path })
+    Ok(Process { id, path, handle })
+}
+
+fn get_process_handle(id: usize, flags: PROCESS_ACCESS_RIGHTS) -> Result<Handle, Error> {
+    let handle = unsafe { OpenProcess(flags, false, id as u32)? };
+    Ok(Handle(handle))
 }
 
 #[repr(C)]
@@ -224,7 +259,19 @@ struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX {
     Reserved: u32,
 }
 
-pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
+// TODO pass in handle to avoid reopening handle
+pub fn files_by_pid(pid: usize) -> Result<Vec<PathBuf>, Error> {
+    let handle = get_process_handle(pid, PROCESS_DUP_HANDLE)?;
+    files_inner(pid, &handle)
+}
+
+pub fn files(process: &Process) -> Result<Vec<PathBuf>, Error> {
+    files_inner(process.id(), &process.handle)
+}
+
+fn files_inner(pid: usize, handle: &Handle) -> Result<Vec<PathBuf>, Error> {
+    let source_proc_handle = handle.0;
+
     const SYSTEM_HANDLE_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(0x10);
     const SYSTEM_EXTENDED_HANDLE_INFORMATION: SYSTEM_INFORMATION_CLASS =
         SYSTEM_INFORMATION_CLASS(0x40);
@@ -255,26 +302,37 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
     }?;
     let mut files = Vec::with_capacity(handle_info.NumberOfHandles);
     unsafe {
-        let proc_handle = OpenProcess(PROCESS_DUP_HANDLE, false, pid as u32)?;
-
+        let target_proc_handle = GetCurrentProcess();
         let mut length = u32::default();
         let mut type_info_buf: Vec<u8> =
             Vec::with_capacity(size_of::<PUBLIC_OBJECT_TYPE_INFORMATION>());
         let mut path_buf: Vec<u16> = vec![0; MAX_PATH as usize];
         let mut ptr = &handle_info.Handles as *const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
-        for i in 0..handle_info.NumberOfHandles {
+        for _ in 0..handle_info.NumberOfHandles {
             let handle_entry = &*ptr;
             if handle_entry.UniqueProcessId == pid {
-                let mut handle = HANDLE::default();
-                if NtDuplicateObject(
-                    proc_handle,
-                    HANDLE(handle_entry.HandleValue as _),
-                    GetCurrentProcess(),
-                    Some(&mut handle),
-                    0,
-                    0,
-                    0,
-                )
+                if loop {
+                    match NtDuplicateObject(
+                        source_proc_handle,
+                        HANDLE(handle_entry.HandleValue as _),
+                        target_proc_handle,
+                        Some(&mut HANDLE::default()),
+                        0,
+                        0,
+                        0,
+                    )
+                    .ok()
+                    {
+                        Err(err) => {
+                            if err.code() != STATUS_ACCESS_DENIED.to_hresult() {
+                                break Err(err);
+                            }
+                            // TODO: try again setting permission
+                            break Err(err);
+                        }
+                        Ok(_) => break Ok(()),
+                    }
+                }
                 .is_ok()
                 {
                     let object_type_info = loop {
@@ -330,11 +388,10 @@ pub fn files(pid: usize) -> Result<Vec<PathBuf>, Error> {
                             }
                         }
                     }
-                };
+                }
             }
             ptr = ptr.add(1);
         }
-        CloseHandle(proc_handle)?;
     };
     Ok(files)
 }

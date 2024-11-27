@@ -1,6 +1,6 @@
 use std::{env, path::Path};
 
-use fileproc::{files, find_processes_by_name, find_processes_by_path, processes};
+use fileproc::{files, files_by_pid, find_processes_by_name, find_processes_by_path, processes};
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     let mut args = env::args().skip(1);
@@ -20,7 +20,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
                 find_processes_by_name(&process_name)
             }?;
             for process in processes {
-                let files = files(process.id())?;
+                let files = files_by_pid(process.id())?;
+                // let files = files(&process)?;
                 println!("process: {process:?} files: {files:?}");
             }
         }
