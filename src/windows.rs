@@ -107,27 +107,53 @@ pub fn processes<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
     Ok(processes)
 }
 
-/// TODO find process given path
-pub fn find_process(name: &str) -> Result<Option<Process>, Error> {
+pub fn find_processes_by_name(name: &str) -> Result<Vec<Process>, Error> {
     let name_u16: Vec<u16> = name.encode_utf16().collect();
-    let id = unsafe {
+    find_processes_cond(|entry| {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
+        if entry.szExeFile[..len as usize] == name_u16 {
+            if let Ok(process) = get_process(entry.th32ProcessID as usize) {
+                return Some(process);
+            }
+        }
+        None
+    })
+}
+
+pub fn find_processes_by_path<P: AsRef<Path>>(file: P) -> Result<Vec<Process>, Error> {
+    let name = file.as_ref().file_name();
+    assert!(name.is_some());
+    let name_u16: Vec<u16> = name.unwrap().to_string_lossy().encode_utf16().collect();
+    find_processes_cond(|entry| {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
+        if entry.szExeFile[..len as usize] == name_u16 {
+            if let Ok(process) = get_process(entry.th32ProcessID as usize) {
+                if process.path() == file.as_ref() {
+                    return Some(process);
+                }
+            }
+        }
+        None
+    })
+}
+
+fn find_processes_cond<P: Fn(PROCESSENTRY32W) -> Option<Process>>(
+    cond: P,
+) -> Result<Vec<Process>, Error> {
+    let mut processes = vec![];
+    unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
         let mut entry = PROCESSENTRY32W::default();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
         Process32FirstW(snapshot, &mut entry)?;
-        let id = loop {
-            if Process32NextW(snapshot, &mut entry).is_err() {
-                return Ok(None);
+        while Process32NextW(snapshot, &mut entry).is_ok() {
+            if let Some(process) = cond(entry) {
+                processes.push(process);
             }
-            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap();
-            if entry.szExeFile[..len as usize] == name_u16 {
-                break entry.th32ProcessID;
-            }
-        };
+        }
         CloseHandle(snapshot)?;
-        id
     };
-    Ok(Some(get_process(id as usize)?))
+    Ok(processes)
 }
 
 fn get_process(id: usize) -> Result<Process, Error> {
